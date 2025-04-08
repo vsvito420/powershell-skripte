@@ -1,5 +1,6 @@
 # Skript zum Entfernen aller Benutzer aus der Administratorengruppe außer dem Domänen-Administrator
 # Dieses Skript ist für die Ausführung über das Ninja RMM Tool konzipiert
+# Unterstützt deutsche und englische Windows-Installationen
 
 try {
     # Verzeichnis erstellen, falls es nicht existiert
@@ -19,24 +20,44 @@ try {
     $inDomain = (Get-WmiObject -Class Win32_ComputerSystem).PartOfDomain
     Write-Host "Computer ist Teil einer Domäne: $inDomain"
     
-    # Administratorengruppe abrufen - Berücksichtigung von lokalisierten Namen
-    if ([System.Environment]::OSVersion.Version.Major -ge 6) {
-        # Für Windows Vista oder höher, SID für die Administratorengruppe ist verlässlicher
+    # Administratorengruppe mittels SID abrufen - funktioniert unabhängig von der Sprache
+    try {
+        # Für Windows Vista oder höher (PowerShell 5.1+)
         $adminGroup = Get-LocalGroup -SID "S-1-5-32-544"
-    } else {
-        # Für ältere Betriebssysteme
-        $adminGroup = [ADSI]"WinNT://./Administrators,group"
+        Write-Host "Administratorengruppe gefunden über SID: $($adminGroup.Name)"
+    } catch {
+        # Alternativer Ansatz für ältere/andere Systeme
+        $adminGroupNames = @("Administratoren", "Administrators")
+        $foundGroup = $false
+        
+        foreach ($groupName in $adminGroupNames) {
+            try {
+                $adminGroup = Get-LocalGroup -Name $groupName -ErrorAction Stop
+                Write-Host "Administratorengruppe gefunden mit Name: $groupName"
+                $foundGroup = $true
+                break
+            } catch {
+                Write-Host "Gruppe '$groupName' nicht gefunden, versuche alternative Namen..."
+            }
+        }
+        
+        if (-not $foundGroup) {
+            throw "Konnte die Administratorengruppe nicht finden. Bitte überprüfen Sie die Gruppenbezeichnungen."
+        }
     }
-    
-    Write-Host "Administratorengruppe gefunden: $($adminGroup.Name)"
     
     # Mitglieder der Administratorengruppe abrufen
     $members = Get-LocalGroupMember -Group $adminGroup.Name
     Write-Host "Gefundene Mitglieder in der Administratorengruppe: $($members.Count)"
     
-    # Domänen-Admin-Konto identifizieren
-    $domainAdminName = if ($inDomain) { "Domain Admins" } else { "Administrator" }
-    Write-Host "Zu behaltender Admin-Account: $domainAdminName"
+    # Domänen-Admin-Konto identifizieren (mehrsprachig)
+    if ($inDomain) {
+        $domainAdminNames = @("Domain Admins", "Domänen-Admins", "Domänenadministratoren")
+    } else {
+        $domainAdminNames = @("Administrator", "Admini strator")
+    }
+    
+    Write-Host "Zu behaltende Admin-Accounts: $($domainAdminNames -join ', ')"
     
     # Jeden Benutzer überprüfen und gegebenenfalls entfernen
     foreach ($member in $members) {
@@ -51,7 +72,23 @@ try {
         Write-Host "Überprüfe Mitglied: $memberName (Kurzname: $shortName)"
         
         # Prüfen, ob der Benutzer behalten werden soll
-        if (($shortName -ne $domainAdminName) -and ($shortName -ne "Administrator") -and ($shortName -notlike "*Domain Admins*")) {
+        $keepUser = $false
+        
+        # Prüfen gegen bekannte Admin-Namen
+        foreach ($adminName in $domainAdminNames) {
+            if ($shortName -eq $adminName -or $shortName -like "*$adminName*") {
+                $keepUser = $true
+                break
+            }
+        }
+        
+        # Built-in Administrator wird immer behalten
+        if ($member.SID.Value.EndsWith("-500")) {
+            Write-Host "Mitglied mit SID $($member.SID.Value) ist der integrierte Administrator-Account."
+            $keepUser = $true
+        }
+        
+        if (-not $keepUser) {
             try {
                 Remove-LocalGroupMember -Group $adminGroup.Name -Member $memberName
                 Write-Host "Benutzer $memberName wurde aus der Administratorengruppe entfernt."
